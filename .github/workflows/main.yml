@@ -28,8 +28,8 @@ jobs:
 
       - name: Rodar script de verificação
         env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
+          TELEGRAM_TOKEN: ${{ 8003425790:AAG10LJgUYV4cVbU55jB-cvaqXZizhMqULY }}
+          CHAT_ID: ${{ 7312896445 }}
         run: python main.py
 
       - name: Salvar estado (Commitar arquivo de memória)
