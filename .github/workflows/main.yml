@@ -2,8 +2,10 @@ name: Checar Vagas Santa Cruz
 
 on:
   schedule:
-    - cron: '0 */4 * * *'
-  workflow_dispatch:
+    # Cron: Minuto Hora Dia Mês Semana
+    # 11:00 UTC equivale a 08:00 no Horário de Brasília
+    - cron: '0 11 * * *'
+  workflow_dispatch: # Botão manual continua funcionando
 
 jobs:
   run-scraper:
