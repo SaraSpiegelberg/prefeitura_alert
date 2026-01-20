@@ -2,17 +2,15 @@ name: Checar Vagas Santa Cruz
 
 on:
   schedule:
-    # Roda a cada 4 horas (ajuste conforme necessidade)
-    # Formato cron: minuto hora dia mes dia-semana
     - cron: '0 */4 * * *'
-  workflow_dispatch: # Permite rodar manualmente clicando num botão
+  workflow_dispatch:
 
 jobs:
   run-scraper:
     runs-on: ubuntu-latest
     
     permissions:
-      contents: write # Permissão crucial para salvar o arquivo de memória
+      contents: write
 
     steps:
       - name: Baixar código do repositório
@@ -28,11 +26,11 @@ jobs:
 
       - name: Rodar script de verificação
         env:
-          TELEGRAM_TOKEN: ${{ 8003425790:AAG10LJgUYV4cVbU55jB-cvaqXZizhMqULY }}
-          CHAT_ID: ${{ 7312896445 }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python main.py
 
-      - name: Salvar estado (Commitar arquivo de memória)
+      - name: Salvar estado
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Atualizar lista de vagas vistas"
