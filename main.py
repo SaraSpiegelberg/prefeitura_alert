@@ -16,7 +16,6 @@ def enviar_telegram(mensagem):
         print("Erro: Credenciais não configuradas.")
         return
     
-    # Envia como texto puro (sem Markdown) para evitar quebrar a formatação
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": mensagem}
     requests.post(url, data=data)
@@ -33,19 +32,17 @@ def salvar_vistas(vistas):
             f.write(f"{v}\n")
 
 def extrair_numero_ano(texto):
-    # Extrai números para ordenar corretamente (Ex: 007/2026 > 006/2026)
+    # Procura estritamente o padrão NNN/AAAA (Ex: 007/2026)
     match = re.search(r'(\d+)/(\d{4})', texto)
     if match:
-        return int(match.group(2)), int(match.group(1)) # Ano, Número
+        return int(match.group(2)), int(match.group(1)) # Retorna (2026, 7) para ordenar
     return 0, 0
-
-def limpar_titulo(texto):
-    # Remove espaços extras e quebras de linha
-    return " ".join(texto.split())
 
 def main():
     print("Acessando o site...")
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
     
     try:
         response = requests.get(URL_ALVO, headers=headers, timeout=30)
@@ -59,34 +56,38 @@ def main():
     todos_editais = []
     ids_encontrados_agora = set()
     
-    padrao_edital = re.compile(r'\d+/\d{4}')
+    # Regex flexível: Pega qualquer coisa que pareça "000/202X"
+    padrao_numero = re.compile(r'\d+/\d{4}')
 
-    # 1. Coleta TUDO o que tem na página
+    # Varre TODOS os links da página
     for link in soup.find_all('a', href=True):
         href = link['href']
-        texto_original = link.get_text(strip=True)
+        texto_original = link.get_text(" ", strip=True) # " " evita palavras coladas
         
-        if padrao_edital.search(texto_original) or "edital" in href.lower() or "pss" in texto_original.lower():
+        # A MÁGICA: Se tiver "007/2026" no texto, é vaga! (Ignora se tem 'edital' ou não)
+        if padrao_numero.search(texto_original):
+            
             if not href.startswith("http"):
                 href = f"https://www.santacruz.rs.gov.br{href}"
             
-            titulo = limpar_titulo(texto_original)
+            # Limpa o título (tira espaços duplos)
+            titulo = " ".join(texto_original.split())
             
             edital = {
-                'id': href,
+                'id': href, # Usamos o link como ID único
                 'titulo': titulo,
                 'ordem': extrair_numero_ano(titulo)
             }
             
-            # Evita duplicatas na lista
+            # Evita duplicatas (links repetidos na página)
             if href not in ids_encontrados_agora:
                 todos_editais.append(edital)
                 ids_encontrados_agora.add(href)
 
-    # 2. Ordena do mais recente para o mais antigo
+    # Ordena a lista completa: O mais novo (2026) fica em cima
     todos_editais.sort(key=lambda x: x['ordem'], reverse=True)
 
-    # 3. Separa o que é NOVO do que é VELHO
+    # --- LÓGICA DE SEPARAÇÃO ---
     vagas_memoria = carregar_vistas()
     lista_novas = []
     
@@ -94,16 +95,16 @@ def main():
         if edital['id'] not in vagas_memoria:
             lista_novas.append(edital)
 
-    # 4. Define a lista de ANTERIORES
-    # Lógica: Pega os Top 3 da página que NÃO estão na lista de novas.
-    # Se não tiver novas, pega simplesmente os Top 3 da página.
-    ids_novas = [n['id'] for n in lista_novas]
-    lista_anteriores = [e for e in todos_editais if e['id'] not in ids_novas]
-    
-    # Pega apenas os 3 primeiros da lista de anteriores
-    lista_anteriores = lista_anteriores[:3]
+    # --- LISTA DE ANTERIORES ---
+    # Pega simplesmente os 3 primeiros da lista GERAL ordenada
+    # (Ignorando se são novos ou velhos, queremos mostrar os últimos publicados)
+    lista_anteriores = todos_editais[:3]
 
-    # --- MONTAGEM DA MENSAGEM (O Visual que você pediu) ---
+    # Remove da lista de anteriores o que já estiver na lista de novas (para não repetir)
+    ids_novas = [n['id'] for n in lista_novas]
+    lista_anteriores = [a for a in lista_anteriores if a['id'] not in ids_novas]
+
+    # --- MONTAGEM DA MENSAGEM ---
     
     msg = "---Vagas novas---\n\n"
 
@@ -118,26 +119,26 @@ def main():
     if lista_anteriores:
         for a in lista_anteriores:
             msg += f"{a['titulo']}\n"
-    else:
-        # Só acontece se o site estiver vazio ou der erro de leitura
-        msg += "Nenhuma vaga encontrada no site.\n"
+    elif not lista_novas: 
+        # Só diz que não achou nada se não tiver nem novas nem anteriores
+        msg += "Nenhuma vaga recente encontrada (Site mudou?)\n"
 
     # --- ENVIO ---
     
-    # Verifica horários
     agora_utc = datetime.now(timezone.utc)
     eh_horario_relatorio = (agora_utc.hour == 11) # 08h Brasil
     eh_manual = (EVENT_NAME == 'workflow_dispatch')
     tem_novidade = len(lista_novas) > 0
 
+    # Envia se tiver novidade OU for horário de relatório OU for teste manual
     if tem_novidade or eh_manual or eh_horario_relatorio:
-        print("Enviando Telegram...")
+        print(f"Enviando. Novas: {len(lista_novas)}. Total encontradas: {len(todos_editais)}")
         enviar_telegram(msg)
         
-        # Atualiza a memória com TUDO o que viu na página hoje
+        # Salva tudo o que viu hoje na memória
         salvar_vistas(vagas_memoria.union(ids_encontrados_agora))
     else:
-        print("Sem novidades e fora de horário.")
+        print("Silêncio.")
 
 if __name__ == "__main__":
     main()
