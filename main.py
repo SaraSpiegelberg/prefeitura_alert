@@ -45,7 +45,7 @@ def main():
     
     try:
         response = requests.get(URL_BASE, headers=headers, timeout=40, verify=False)
-        response.encoding = response.apparent_encoding # Corrige acentuação
+        response.encoding = response.apparent_encoding
     except Exception as e:
         enviar_telegram(f"Erro ao acessar site: {e}")
         return
@@ -55,47 +55,42 @@ def main():
     todos_editais = []
     ids_encontrados_agora = set()
     
-    # ESTRATÉGIA BASEADA NA SUA IMAGEM:
-    # 1. Encontrar cada caixa de vaga (div class="card-body")
+    # 1. Encontra cada caixa de vaga (div class="card-body")
     cartoes = soup.find_all('div', class_='card-body')
 
     for card in cartoes:
-        # Pega o Título (H5 class="card-title")
+        # Pega o Título
         titulo_tag = card.find('h5', class_='card-title')
         if not titulo_tag:
             continue
             
         titulo_texto = " ".join(titulo_tag.get_text().split())
         
-        # Pega o Botão "Acessar" (input type="button")
+        # Pega o Botão "Acessar" e extrai o link do JavaScript
         botao = card.find('input', attrs={'value': re.compile(r'Acessar', re.I)})
-        
-        link_final = URL_BASE # Link padrão caso falhe
+        link_final = URL_BASE 
         
         if botao and botao.get('onclick'):
-            # O onclick vem assim: javascript:location='?class=PrincipalPage...'
-            # Usamos regex para pegar só o que está entre as aspas simples '...'
             match_link = re.search(r"location='(.*?)'", botao['onclick'])
             if match_link:
                 parametro = match_link.group(1)
                 link_final = f"{URL_BASE}{parametro}"
 
-        # Verifica se é um edital válido (tem número/ano)
+        # Se tiver número de edital (ex: 007/2026), adiciona na lista
         if extrair_numero_ano(titulo_texto) != (0,0):
             edital = {
-                'id': titulo_texto, # Usamos o título como ID único já que o link pode mudar de sessão
+                'id': titulo_texto, # Identificador único
                 'titulo': titulo_texto,
                 'link': link_final,
                 'ordem': extrair_numero_ano(titulo_texto)
             }
-            
             todos_editais.append(edital)
             ids_encontrados_agora.add(titulo_texto)
 
-    # Ordena: Mais recentes primeiro
+    # 2. Ordena (Mais recentes primeiro)
     todos_editais.sort(key=lambda x: x['ordem'], reverse=True)
 
-    # --- LÓGICA DE SEPARAÇÃO ---
+    # 3. Separa Novas vs Antigas
     vagas_memoria = carregar_vistas()
     lista_novas = []
     
@@ -103,9 +98,8 @@ def main():
         if edital['id'] not in vagas_memoria:
             lista_novas.append(edital)
 
-    # --- ANTERIORES (Top 3) ---
+    # 4. Define "Anteriores" (Top 3 que não são as novas)
     lista_anteriores = todos_editais[:3]
-    # Remove duplicatas se elas já estiverem nas novas
     ids_novas = [n['id'] for n in lista_novas]
     lista_anteriores = [a for a in lista_anteriores if a['id'] not in ids_novas]
 
@@ -127,17 +121,19 @@ def main():
         msg += "Nenhum edital encontrado (Site mudou?)\n"
 
     # --- ENVIO ---
+    # Envia se: Tiver novidade OU for horário do relatório (11h UTC = 08h Brasil) OU for Manual
     agora_utc = datetime.now(timezone.utc)
-    eh_horario_relatorio = (agora_utc.hour == 11) # 11h UTC = 08h Brasil
+    eh_horario_relatorio = (agora_utc.hour == 11) 
     eh_manual = (EVENT_NAME == 'workflow_dispatch')
     tem_novidade = len(lista_novas) > 0
 
     if tem_novidade or eh_manual or eh_horario_relatorio:
-        print(f"Enviando telegram. Novas: {len(lista_novas)}. Total lidas: {len(todos_editais)}")
+        print(f"Enviando telegram. Novas: {len(lista_novas)}")
         enviar_telegram(msg)
+        # Só atualiza a memória se tiver novas, para não "esquecer" nada por acidente
         salvar_vistas(vagas_memoria.union(ids_encontrados_agora))
     else:
-        print(f"Silêncio. Vagas lidas: {len(todos_editais)}")
+        print("Silêncio (Fora de horário e sem novidades).")
 
 if __name__ == "__main__":
     main()
