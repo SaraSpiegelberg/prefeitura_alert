@@ -15,7 +15,6 @@ def enviar_telegram(mensagem):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         print("Erro: Credenciais não configuradas.")
         return
-    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": mensagem}
     requests.post(url, data=data)
@@ -32,21 +31,27 @@ def salvar_vistas(vistas):
             f.write(f"{v}\n")
 
 def extrair_numero_ano(texto):
-    # Procura estritamente o padrão NNN/AAAA (Ex: 007/2026)
     match = re.search(r'(\d+)/(\d{4})', texto)
     if match:
-        return int(match.group(2)), int(match.group(1)) # Retorna (2026, 7) para ordenar
+        return int(match.group(2)), int(match.group(1)) # Ano, Número
     return 0, 0
 
 def main():
     print("Acessando o site...")
+    # Header simulando um navegador real para evitar bloqueios
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
     }
     
     try:
-        response = requests.get(URL_ALVO, headers=headers, timeout=30)
+        # verify=False ajuda se o certificado SSL da prefeitura for antigo (comum em gov.br)
+        response = requests.get(URL_ALVO, headers=headers, timeout=40, verify=False) 
         response.raise_for_status()
+        
+        # Tenta decodificar corretamente (sites antigos as vezes usam latin-1)
+        response.encoding = response.apparent_encoding
+        
     except Exception as e:
         enviar_telegram(f"Erro ao acessar site: {e}")
         return
@@ -56,38 +61,66 @@ def main():
     todos_editais = []
     ids_encontrados_agora = set()
     
-    # Regex flexível: Pega qualquer coisa que pareça "000/202X"
+    # Regex: Procura estritamente NNN/AAAA
     padrao_numero = re.compile(r'\d+/\d{4}')
 
-    # Varre TODOS os links da página
-    for link in soup.find_all('a', href=True):
-        href = link['href']
-        texto_original = link.get_text(" ", strip=True) # " " evita palavras coladas
+    # NOVA ESTRATÉGIA: Busca Texto primeiro, Link depois
+    # Procura todos os pedaços de texto visíveis na página
+    elementos_texto = soup.find_all(string=padrao_numero)
+
+    for texto_node in elementos_texto:
+        texto_limpo = " ".join(texto_node.strip().split())
         
-        # A MÁGICA: Se tiver "007/2026" no texto, é vaga! (Ignora se tem 'edital' ou não)
-        if padrao_numero.search(texto_original):
+        # Se o texto for muito curto, pega o pai para garantir que pegamos a descrição completa
+        # Ex: as vezes o texto é só "007/2026" e o "Médico" está num span ao lado
+        elemento_pai = texto_node.parent
+        titulo_completo = " ".join(elemento_pai.get_text(" ", strip=True).split())
+
+        # Agora caçamos o link associado a esse texto
+        # Procuramos um link (<a>) no próprio elemento ou nos pais (subindo a escada do HTML)
+        link_encontrado = None
+        cursor = elemento_pai
+        
+        # Sobe até 4 níveis (span -> div -> td -> tr) procurando um <a href>
+        for _ in range(4):
+            if not cursor: break
             
-            if not href.startswith("http"):
-                href = f"https://www.santacruz.rs.gov.br{href}"
+            # Verifica se o próprio cursor é um link
+            if cursor.name == 'a' and cursor.get('href'):
+                link_encontrado = cursor.get('href')
+                break
             
-            # Limpa o título (tira espaços duplos)
-            titulo = " ".join(texto_original.split())
+            # Verifica se tem um link DENTRO do cursor
+            busca_link = cursor.find('a', href=True)
+            if busca_link:
+                link_encontrado = busca_link['href']
+                break
+            
+            cursor = cursor.parent
+
+        if link_encontrado:
+            if not link_encontrado.startswith("http"):
+                link_encontrado = f"https://www.santacruz.rs.gov.br{link_encontrado}"
+            
+            # ID único baseado no Título + Link (para diferenciar editais com mesmo link)
+            id_unico = f"{texto_limpo}||{link_encontrado}"
             
             edital = {
-                'id': href, # Usamos o link como ID único
-                'titulo': titulo,
-                'ordem': extrair_numero_ano(titulo)
+                'id': id_unico, 
+                'titulo': titulo_completo,
+                'link': link_encontrado,
+                'ordem': extrair_numero_ano(texto_limpo)
             }
             
-            # Evita duplicatas (links repetidos na página)
-            if href not in ids_encontrados_agora:
+            # Adiciona se não for duplicado
+            if id_unico not in ids_encontrados_agora:
                 todos_editais.append(edital)
-                ids_encontrados_agora.add(href)
+                ids_encontrados_agora.add(id_unico)
 
-    # Ordena a lista completa: O mais novo (2026) fica em cima
+    # Ordena
     todos_editais.sort(key=lambda x: x['ordem'], reverse=True)
 
-    # --- LÓGICA DE SEPARAÇÃO ---
+    # --- SEPARAÇÃO ---
     vagas_memoria = carregar_vistas()
     lista_novas = []
     
@@ -95,22 +128,18 @@ def main():
         if edital['id'] not in vagas_memoria:
             lista_novas.append(edital)
 
-    # --- LISTA DE ANTERIORES ---
-    # Pega simplesmente os 3 primeiros da lista GERAL ordenada
-    # (Ignorando se são novos ou velhos, queremos mostrar os últimos publicados)
+    # --- ANTERIORES (Top 3 geral) ---
     lista_anteriores = todos_editais[:3]
-
-    # Remove da lista de anteriores o que já estiver na lista de novas (para não repetir)
+    # Remove duplicatas se elas já estiverem nas novas
     ids_novas = [n['id'] for n in lista_novas]
     lista_anteriores = [a for a in lista_anteriores if a['id'] not in ids_novas]
 
-    # --- MONTAGEM DA MENSAGEM ---
-    
+    # --- ENVIO ---
     msg = "---Vagas novas---\n\n"
 
     if lista_novas:
         for n in lista_novas:
-            msg += f"{n['titulo']}\nLink: {n['id']}\n\n"
+            msg += f"{n['titulo']}\nLink: {n['link']}\n\n"
     else:
         msg += "SEM NOVAS VAGAS\n\n"
 
@@ -118,27 +147,23 @@ def main():
     
     if lista_anteriores:
         for a in lista_anteriores:
+            # Mostra só o título para ficar limpo
             msg += f"{a['titulo']}\n"
-    elif not lista_novas: 
-        # Só diz que não achou nada se não tiver nem novas nem anteriores
-        msg += "Nenhuma vaga recente encontrada (Site mudou?)\n"
+    elif not todos_editais:
+        msg += "Nenhum edital encontrado (Site inacessível ou layout mudou drasticamente).\n"
 
-    # --- ENVIO ---
-    
+    # Envia
     agora_utc = datetime.now(timezone.utc)
-    eh_horario_relatorio = (agora_utc.hour == 11) # 08h Brasil
+    eh_horario_relatorio = (agora_utc.hour == 11) 
     eh_manual = (EVENT_NAME == 'workflow_dispatch')
     tem_novidade = len(lista_novas) > 0
 
-    # Envia se tiver novidade OU for horário de relatório OU for teste manual
     if tem_novidade or eh_manual or eh_horario_relatorio:
-        print(f"Enviando. Novas: {len(lista_novas)}. Total encontradas: {len(todos_editais)}")
+        print(f"Enviando. Novas: {len(lista_novas)}. Total detetadas: {len(todos_editais)}")
         enviar_telegram(msg)
-        
-        # Salva tudo o que viu hoje na memória
         salvar_vistas(vagas_memoria.union(ids_encontrados_agora))
     else:
-        print("Silêncio.")
+        print(f"Silêncio. Total detetadas: {len(todos_editais)}")
 
 if __name__ == "__main__":
     main()
