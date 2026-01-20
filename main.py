@@ -15,12 +15,10 @@ def enviar_telegram(mensagem):
     if not TELEGRAM_TOKEN or not CHAT_ID:
         print("Erro: Credenciais não configuradas.")
         return
-    # O Telegram tem limite de 4096 caracteres. Se ficar muito grande, cortamos.
-    if len(mensagem) > 4000:
-        mensagem = mensagem[:4000] + "\n... (lista cortada por tamanho)"
-        
+    
+    # Envia como texto puro (sem Markdown) para evitar quebrar a formatação
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": mensagem} # Tirei o Markdown para evitar erros de formatação no layout
+    data = {"chat_id": CHAT_ID, "text": mensagem}
     requests.post(url, data=data)
 
 def carregar_vistas():
@@ -35,13 +33,15 @@ def salvar_vistas(vistas):
             f.write(f"{v}\n")
 
 def extrair_numero_ano(texto):
-    # Tenta achar algo como "007/2026" ou "7/2026" para ordenar
+    # Extrai números para ordenar corretamente (Ex: 007/2026 > 006/2026)
     match = re.search(r'(\d+)/(\d{4})', texto)
     if match:
-        numero = int(match.group(1))
-        ano = int(match.group(2))
-        return ano, numero
-    return 0, 0 # Se não achar, joga pro final da lista
+        return int(match.group(2)), int(match.group(1)) # Ano, Número
+    return 0, 0
+
+def limpar_titulo(texto):
+    # Remove espaços extras e quebras de linha
+    return " ".join(texto.split())
 
 def main():
     print("Acessando o site...")
@@ -51,97 +51,93 @@ def main():
         response = requests.get(URL_ALVO, headers=headers, timeout=30)
         response.raise_for_status()
     except Exception as e:
-        enviar_telegram(f"⚠️ Erro ao acessar o site: {e}")
+        enviar_telegram(f"Erro ao acessar site: {e}")
         return
 
     soup = BeautifulSoup(response.text, 'html.parser')
     
-    # Listas para organizar
-    todos_editais_pagina = [] 
-    vagas_vistas_ids = carregar_vistas()
+    todos_editais = []
     ids_encontrados_agora = set()
-
-    # Regex simples para identificar editais
+    
     padrao_edital = re.compile(r'\d+/\d{4}')
 
+    # 1. Coleta TUDO o que tem na página
     for link in soup.find_all('a', href=True):
         href = link['href']
         texto_original = link.get_text(strip=True)
         
-        # Filtro: Pega se tiver número de edital OU palavras chave
         if padrao_edital.search(texto_original) or "edital" in href.lower() or "pss" in texto_original.lower():
-            
             if not href.startswith("http"):
                 href = f"https://www.santacruz.rs.gov.br{href}"
             
-            # Limpeza do Texto para ficar bonito (Ex: Tira espaços extras)
-            titulo = " ".join(texto_original.split())
+            titulo = limpar_titulo(texto_original)
             
-            # Cria um objeto para facilitar a ordenação
             edital = {
                 'id': href,
                 'titulo': titulo,
-                'link': href,
-                'ordem': extrair_numero_ano(titulo) # Usado para ordenar (2026, 7)
+                'ordem': extrair_numero_ano(titulo)
             }
             
-            todos_editais_pagina.append(edital)
-            ids_encontrados_agora.add(href)
+            # Evita duplicatas na lista
+            if href not in ids_encontrados_agora:
+                todos_editais.append(edital)
+                ids_encontrados_agora.add(href)
 
-    # Ordena: Do ano/número maior para o menor (007/2026 vem antes de 006/2026)
-    todos_editais_pagina.sort(key=lambda x: x['ordem'], reverse=True)
+    # 2. Ordena do mais recente para o mais antigo
+    todos_editais.sort(key=lambda x: x['ordem'], reverse=True)
 
-    # Separa em NOVAS e ANTERIORES
+    # 3. Separa o que é NOVO do que é VELHO
+    vagas_memoria = carregar_vistas()
     lista_novas = []
-    lista_anteriores = []
-
-    for edital in todos_editais_pagina:
-        if edital['id'] not in vagas_vistas_ids:
+    
+    for edital in todos_editais:
+        if edital['id'] not in vagas_memoria:
             lista_novas.append(edital)
-        else:
-            lista_anteriores.append(edital)
 
-    # --- MONTAGEM DA MENSAGEM ---
+    # 4. Define a lista de ANTERIORES
+    # Lógica: Pega os Top 3 da página que NÃO estão na lista de novas.
+    # Se não tiver novas, pega simplesmente os Top 3 da página.
+    ids_novas = [n['id'] for n in lista_novas]
+    lista_anteriores = [e for e in todos_editais if e['id'] not in ids_novas]
     
-    deve_enviar = False
-    
-    # Cabeçalho
-    msg = "------------Vagas Novas--------------------\n\n"
+    # Pega apenas os 3 primeiros da lista de anteriores
+    lista_anteriores = lista_anteriores[:3]
 
-    # Bloco 1: Vagas Novas
+    # --- MONTAGEM DA MENSAGEM (O Visual que você pediu) ---
+    
+    msg = "---Vagas novas---\n\n"
+
     if lista_novas:
-        deve_enviar = True # Se tem nova, TEM que enviar
         for n in lista_novas:
-            msg += f"🔥 {n['titulo']}\nLink: {n['link']}\n\n"
+            msg += f"{n['titulo']}\nLink: {n['id']}\n\n"
     else:
-        msg += "NENHUMA VAGA NOVA HOJE\n\n"
+        msg += "SEM NOVAS VAGAS\n\n"
 
-    # Bloco 2: Anteriores (Limitado a 15 para não spammar demais)
-    msg += "----------- ANTERIORES---------------------\n"
+    msg += "---Anteriores---\n"
+    
     if lista_anteriores:
-        for a in lista_anteriores[:15]:
+        for a in lista_anteriores:
             msg += f"{a['titulo']}\n"
     else:
-        msg += "(Nenhum histórico recente encontrado)\n"
+        # Só acontece se o site estiver vazio ou der erro de leitura
+        msg += "Nenhuma vaga encontrada no site.\n"
 
-    # --- LÓGICA DE ENVIO ---
+    # --- ENVIO ---
     
-    # Verifica horário (08:00 BRT = 11:00 UTC)
+    # Verifica horários
     agora_utc = datetime.now(timezone.utc)
-    eh_horario_relatorio = (agora_utc.hour == 11)
+    eh_horario_relatorio = (agora_utc.hour == 11) # 08h Brasil
     eh_manual = (EVENT_NAME == 'workflow_dispatch')
+    tem_novidade = len(lista_novas) > 0
 
-    # Envia SE: (Tiver Novas) OU (For Manual) OU (For Relatório das 08h)
-    if deve_enviar or eh_manual or eh_horario_relatorio:
-        print("Enviando mensagem para o Telegram...")
+    if tem_novidade or eh_manual or eh_horario_relatorio:
+        print("Enviando Telegram...")
         enviar_telegram(msg)
         
-        # Atualiza a memória
-        if lista_novas:
-            nova_memoria = vagas_vistas_ids.union(ids_encontrados_agora)
-            salvar_vistas(nova_memoria)
+        # Atualiza a memória com TUDO o que viu na página hoje
+        salvar_vistas(vagas_memoria.union(ids_encontrados_agora))
     else:
-        print("Nada novo e fora de horário. Silêncio.")
+        print("Sem novidades e fora de horário.")
 
 if __name__ == "__main__":
     main()
